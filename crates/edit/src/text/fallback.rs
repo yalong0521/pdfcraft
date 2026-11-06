@@ -52,11 +52,14 @@ fn fallback_names(face: &CraftFont, hebrew: bool) -> (&'static str, &'static str
 /// content stream that may name the page's fonts can be read: the page's own, and those of form
 /// XObjects and Type 3 glyphs that have no resources of their own and so use the page's.
 pub(super) fn drop_unused_fallback_fonts(doc: &mut Document, page: usize) {
+    drop_unused_type3_fonts(doc, page, is_type3_fallback);
+}
+
+pub(crate) fn drop_unused_type3_fonts(doc: &mut Document, page: usize, is_generated: impl Fn(&Dict) -> bool) {
     let Ok(p) = page_dict(doc, page) else { return };
     let Some(Object::Dict(mut resources)) = p.dict.get(b"Resources").cloned() else { return };
     let Some(mut fonts) = resources.get(b"Font").and_then(|f| doc.dict(f)) else { return };
-    let generated: Vec<Vec<u8>> =
-        fonts.iter().filter(|(_, f)| doc.dict(f).is_some_and(|d| is_type3_fallback(&d))).map(|(name, _)| name.clone()).collect();
+    let generated: Vec<Vec<u8>> = fonts.iter().filter(|(_, f)| doc.dict(f).is_some_and(|d| is_generated(&d))).map(|(name, _)| name.clone()).collect();
     if generated.is_empty() {
         return;
     }
@@ -439,7 +442,7 @@ pub(super) fn add_type3_font(doc: &mut Document, fonts_res: &mut Dict, face: &Cr
     let mut widths = Vec::with_capacity(last_char);
     let mut differences = vec![Object::Int(1)];
     let mut cmap = String::from(
-        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CMapType 2 def\n1 begincodespacerange\n<01> <FF>\nendcodespacerange\n",
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CMapName /PCUnicode def\n/CMapType 2 def\n1 begincodespacerange\n<01> <FF>\nendcodespacerange\n",
     );
     cmap.push_str(&format!("{last_char} beginbfchar\n"));
     for glyph in glyphs {
@@ -533,14 +536,13 @@ pub(crate) fn unique_font_name(fonts_res: &Dict, base: &str) -> String {
 /// The Type3 font dictionary for `(character, CharProc body, advance in em)` glyphs, codes from
 /// 1: one CharProc per code, `/Differences` glyph names, real `/Widths`, and a `/ToUnicode` CMap
 /// so the text extracts back (this is what makes the output Unicode-correct, not just visible).
-pub(crate) fn type3_font_dict(doc: &mut Document, glyphs: &[(char, Vec<u8>, f64)]) -> Result<Dict, EditError> {
+pub(crate) fn type3_font_dict(doc: &mut Document, glyphs: &[(char, Vec<u8>, f64)], name: &str) -> Result<Dict, EditError> {
     let mut charprocs = Dict::new();
     let mut differences = vec![Object::Int(1)];
     let mut widths = Vec::with_capacity(glyphs.len());
     let mut cmap = String::from(
-        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CMapType 2 def\n1 begincodespacerange\n<01> <FF>\nendcodespacerange\n",
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CMapName /PCUnicode def\n/CMapType 2 def\n1 begincodespacerange\n<01> <FF>\nendcodespacerange\n",
     );
-    cmap.push_str(&format!("{} beginbfchar\n", glyphs.len()));
     let mut codes = Vec::with_capacity(glyphs.len());
     for (i, (ch, path, width)) in glyphs.iter().enumerate() {
         let code = u8::try_from(i + 1).map_err(|_| EditError::Invalid("too many unique characters for one font".into()))?;
@@ -551,10 +553,16 @@ pub(crate) fn type3_font_dict(doc: &mut Document, glyphs: &[(char, Vec<u8>, f64)
         charprocs.set(glyph_name.as_bytes().to_vec(), Object::Ref(proc_ref));
         differences.push(Object::name(&glyph_name));
         widths.push(Object::Real((width * 1000.0).round()));
-        cmap.push_str(&format!("<{code:02X}> <{}>\n", unicode_hex(*ch)));
-        codes.push((*ch, code, *width));
+        codes.push((*ch, code));
     }
-    cmap.push_str("endbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    for chunk in codes.chunks(100) {
+        cmap.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for &(ch, code) in chunk {
+            cmap.push_str(&format!("<{code:02X}> <{}>\n", unicode_hex(ch)));
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
     let mut cmap_dict = Dict::new();
     cmap_dict.set(b"Length".to_vec(), cmap.len() as i64);
     let cmap_ref = doc.add(Object::Stream(Stream::from_raw(cmap_dict, cmap.into_bytes())));
@@ -564,7 +572,7 @@ pub(crate) fn type3_font_dict(doc: &mut Document, glyphs: &[(char, Vec<u8>, f64)
     let mut font = Dict::new();
     font.set(b"Type".to_vec(), Object::name("Font"));
     font.set(b"Subtype".to_vec(), Object::name("Type3"));
-    font.set(b"Name".to_vec(), Object::name("PCFallback"));
+    font.set(b"Name".to_vec(), Object::name(name));
     font.set(b"FontBBox".to_vec(), Object::Array(vec![Object::Int(0), Object::Int(-300), Object::Int(1000), Object::Int(1000)]));
     font.set(
         b"FontMatrix".to_vec(),

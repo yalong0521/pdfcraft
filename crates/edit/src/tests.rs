@@ -5394,7 +5394,10 @@ fn header_and_watermark_drawability_matches_what_applying_refuses() {
         let wm = Watermark { text: text.into(), ..Watermark::default() };
         assert_eq!(wm.first_undrawable(), refused, "{text:?}");
         let applied = add_watermark(&mut fixture(), &[0], &wm, false);
-        assert_eq!(applied.err().map(|e| e.to_string()), refused.map(undrawable_message), "{text:?}");
+        match refused {
+            Some(c) => assert!(applied.unwrap_err().to_string().contains(&format!("U+{:04X}", u32::from(c))), "{text:?}"),
+            None => applied.unwrap(),
+        }
     }
 }
 
@@ -5412,8 +5415,8 @@ fn page_text_the_standard_fonts_cant_draw_is_refused() {
         ..HeaderFooter::default()
     };
     assert!(add_header_footer(&mut doc, &[0, 1], &hf, true, &cx()).unwrap_err().to_string().contains("U+0395"));
-    let wm = Watermark { text: "机密".into(), ..Watermark::default() };
-    assert!(add_watermark(&mut doc, &[0], &wm, true).unwrap_err().to_string().contains("U+673A"));
+    let wm = Watermark { text: "\u{10FFFF}".into(), ..Watermark::default() };
+    assert!(add_watermark(&mut doc, &[0], &wm, true).unwrap_err().to_string().contains("U+10FFFF"));
     let after: Vec<Vec<String>> = (0..3).map(|p| streams(&reopen(&doc), p)).collect();
     assert_eq!(before, after, "a refused edit changes nothing");
     // Western European text, including what only WinAnsi (not Latin-1) has, still works.

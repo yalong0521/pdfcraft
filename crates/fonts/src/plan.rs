@@ -1,19 +1,18 @@
-//! Planning visible Unicode text output for OCR: which characters the standard WinAnsi
-//! fonts show as is, which need a Type3 font drawn from the craft-fonts faces, and which have
-//! no glyph anywhere (written as `?` — and counted, never silently dropped).
+//! Plan Unicode text for OCR and text watermarks. WinAnsi text uses the standard fonts.
+//! Other characters can use Type3 glyphs drawn from craft-fonts. OCR reports substitutions
+//! and watermarks refuse text with missing glyphs.
 //!
 //! The plan is a pure function of the words ([`TextPlan::for_words`]). The content generators
 //! (`pdfcraft_ocr::text_layer` / `visible_text_layer`) read the per-character codes and
 //! advances from it, and whoever registers the fonts (`pdfcraft_edit::add_type3_fonts`) fills
 //! in each face's resource name and object. The build must work without craft-fonts too: there
-//! [`CRAFT_FONTS`] is empty, nothing can be planned, and every non-WinAnsi character is
-//! reported as a substitution instead.
+//! [`crate::CRAFT_FONTS`] is empty, so only the WinAnsi path is available.
 
 use std::collections::HashMap;
 
 use pdfcraft_cos::ObjRef;
 
-use crate::{CraftFont, GlyphOutline, craft_glyph, document_japanese_font, face_has, fits_win_ansi, win_ansi_char};
+use crate::{CraftFont, GlyphOutline, craft_glyph, document_japanese_font, face_has, first_non_win_ansi, fits_win_ansi, win_ansi_char};
 
 /// Unique characters per Type3 font: the same bound the text-editing fallback uses, so one
 /// hostile word cannot balloon into thousands of glyph streams. A face with more characters
@@ -68,6 +67,41 @@ pub struct TextPlan {
 }
 
 impl TextPlan {
+    /// Plan lines for a visible watermark. Keep WinAnsi lines in Helvetica, and use the
+    /// bundled Simplified Chinese faces for lines with Han characters or CJK punctuation.
+    /// Unlike OCR, refuse the first character that would need a substitution.
+    pub fn for_hans_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Self, char> {
+        let faces = crate::ui_chinese_fonts();
+        let mut plan = Self::default();
+        for line in lines {
+            let mut encoding = Vec::new();
+            if let Some(first) = first_non_win_ansi(line) {
+                if faces.is_empty() {
+                    return Err(first);
+                }
+                for ch in line.chars() {
+                    if win_ansi_char(ch).is_none() && !crate::is_wide(ch) {
+                        return Err(ch);
+                    }
+                    // WinAnsi watermarks already render tabs as spaces.
+                    let ch = if ch == '\t' { ' ' } else { ch };
+                    let code = match plan.index.get(&ch) {
+                        Some(&code) => code,
+                        None => {
+                            let (face, glyph) = faces.iter().find_map(|&f| craft_glyph(f, ch).ok().map(|g| (f, g))).ok_or(ch)?;
+                            let code = plan.add_glyph(face, ch, glyph).ok_or(ch)?;
+                            plan.index.insert(ch, code);
+                            code
+                        }
+                    };
+                    encoding.push(code);
+                }
+            }
+            plan.words.push(encoding);
+        }
+        Ok(plan)
+    }
+
     /// Plan the output for `words`, in order: characters the WinAnsi fonts can't show get codes
     /// in Type3 fonts built from the craft-fonts faces (the document face preferred, then the
     /// rest of the build input in manifest order); a word whose face can't show a character

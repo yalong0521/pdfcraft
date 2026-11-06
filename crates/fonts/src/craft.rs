@@ -36,9 +36,8 @@ pub fn ui_japanese_fonts() -> Vec<&'static CraftFont> {
     fonts
 }
 
-/// The `Hans` craft-fonts faces for Simplified Chinese interface text, in manifest order.
-/// Empty when built without craft-fonts (Chinese text then shows the font system's
-/// replacement glyph, the same degraded mode as Japanese without craft-fonts).
+/// The `Hans` craft-fonts faces for Simplified Chinese interface text and PDF watermarks,
+/// in manifest order. Empty when the build embeds no Simplified Chinese face.
 pub fn ui_chinese_fonts() -> Vec<&'static CraftFont> {
     CRAFT_FONTS.iter().filter(|f| f.covers("Hans")).collect()
 }

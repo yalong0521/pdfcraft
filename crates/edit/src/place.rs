@@ -512,6 +512,16 @@ pub fn stamp_with_fonts(
 /// the content generators read the names from the plan, so this must run before they are
 /// called for each page.
 pub fn add_type3_fonts(doc: &mut Document, page: usize, plan: &mut pdfcraft_fonts::TextPlan) -> Result<(), EditError> {
+    add_planned_fonts(doc, page, plan, "PCOcr", "PCFallback")
+}
+
+pub(crate) fn add_planned_fonts(
+    doc: &mut Document,
+    page: usize,
+    plan: &mut pdfcraft_fonts::TextPlan,
+    prefix: &str,
+    name: &str,
+) -> Result<(), EditError> {
     if plan.fonts.is_empty() {
         return Ok(());
     }
@@ -529,15 +539,15 @@ pub fn add_type3_fonts(doc: &mut Document, page: usize, plan: &mut pdfcraft_font
                 // content written next.
                 let taken = fonts.get(plan.fonts[i].name.as_bytes()).is_some_and(|o| o.as_ref() != Some(r));
                 if taken {
-                    plan.fonts[i].name = super::text::unique_font_name(&fonts, "PCOcr");
+                    plan.fonts[i].name = super::text::unique_font_name(&fonts, prefix);
                 }
                 r
             }
             None => {
                 let glyphs = plan.fonts[i].glyphs.iter().map(|(ch, g)| (*ch, super::text::glyph_path(g), g.width)).collect::<Vec<_>>();
-                let dict = super::text::type3_font_dict(doc, &glyphs)?;
+                let dict = super::text::type3_font_dict(doc, &glyphs, name)?;
                 let r = doc.add(Object::Dict(dict));
-                plan.fonts[i].name = super::text::unique_font_name(&fonts, "PCOcr");
+                plan.fonts[i].name = super::text::unique_font_name(&fonts, prefix);
                 plan.fonts[i].object = Some(r);
                 r
             }

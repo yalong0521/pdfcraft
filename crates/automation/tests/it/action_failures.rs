@@ -8,6 +8,8 @@ use pdfcraft_engine::Session;
 use pdfcraft_engine::actions::{Action, Step, run_on};
 use serde_json::json;
 
+const UNDRAWABLE: &str = "\u{10FFFF}";
+
 fn pdf() -> Vec<u8> {
     Session::new().create_from_text("Original", "Original text").unwrap().as_ref().clone()
 }
@@ -16,10 +18,10 @@ fn one_step(step: Step) -> Action {
     Action { name: "Custom".into(), description: String::new(), steps: vec![step], builtin: false }
 }
 
-/// The standard fonts can't draw the character, so the watermark step fails and no file is produced.
+/// A character without a glyph fails the watermark step and prevents publishing a file.
 #[test]
 fn failing_watermark_step_fails_the_file_and_publishes_nothing() {
-    let r = run_on(&one_step(Step::AddWatermark("中".into())), "one.pdf", Arc::new(pdf()), |_, _| {});
+    let r = run_on(&one_step(Step::AddWatermark(UNDRAWABLE.into())), "one.pdf", Arc::new(pdf()), |_, _| {});
     assert!(r.is_err(), "a failed step must fail its file: {r:?}");
 }
 
@@ -45,7 +47,7 @@ fn action_run_marks_the_failing_file_as_error_without_output() {
         &json!({
             "paths": [in_file.to_string_lossy()],
             "folder": out.to_string_lossy(),
-            "steps": [{ "step": "add_watermark", "arg": "中" }],
+            "steps": [{ "step": "add_watermark", "arg": UNDRAWABLE }],
         }),
     );
     let report = match reply.unwrap().remove(0) {

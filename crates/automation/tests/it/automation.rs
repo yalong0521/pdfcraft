@@ -3100,6 +3100,39 @@ fn watermarks_move_from_the_page_centre_through_tools() {
 }
 
 #[test]
+fn chinese_text_watermarks_render_and_extract_after_reopen() {
+    if pdfcraft_fonts::ui_chinese_fonts().is_empty() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Chinese text watermarks");
+        return;
+    }
+
+    let text = "PDF：寇天笑";
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = auto(dir.path());
+    let doc = ok(&mut a, "doc_create", json!({ "from": "blank", "pages": 2 }))["doc"].as_u64().unwrap();
+    let render = |a: &mut Automation, doc| a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    let blank = render(&mut a, doc);
+    ok(&mut a, "doc_watermark", json!({ "doc": doc, "pages": [1, 2], "text": text, "rotation": 0 }));
+    let marked = render(&mut a, doc);
+    assert_ne!(marked[0], blank[0], "the watermark changes the rendered pixels");
+
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "marked.pdf" }));
+    let reopened = ok(&mut a, "doc_open", json!({ "path": "marked.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(page_text(&mut a, reopened), [text, text]);
+    assert_eq!(render(&mut a, reopened), marked);
+    let info = ok(&mut a, "doc_info", json!({ "doc": reopened }));
+    assert_eq!(info["fonts"][0]["kind"], "Type3");
+    assert_eq!(info["fonts"][0]["embedded"], true);
+
+    ok(&mut a, "doc_remove_marks", json!({ "doc": reopened, "kind": "watermark" }));
+    assert_eq!(page_text(&mut a, reopened), ["", ""]);
+    assert_eq!(render(&mut a, reopened), blank);
+    ok(&mut a, "doc_save", json!({ "doc": reopened, "path": "unmarked.pdf" }));
+    let unmarked = ok(&mut a, "doc_open", json!({ "path": "unmarked.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "doc_info", json!({ "doc": unmarked }))["fonts"], json!([]));
+}
+
+#[test]
 fn exporting_images_and_text_through_tools() {
     let dir = workdir("export");
     let mut a = auto(&dir);

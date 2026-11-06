@@ -139,12 +139,16 @@ pub struct Watermark {
 }
 
 impl Watermark {
-    /// The first character of a text watermark [`add_watermark`] would refuse, because the
-    /// standard fonts can't draw it (#125). A picture watermark draws no text.
+    /// The first character [`crate::add_watermark`] would refuse. A picture watermark draws no text.
     pub fn first_undrawable(&self) -> Option<char> {
-        match self.source {
-            Some(_) => None,
-            None => self.text.trim().lines().find_map(pdfcraft_fonts::first_non_win_ansi),
+        self.text_plan().err()
+    }
+
+    pub(crate) fn text_plan(&self) -> Result<pdfcraft_fonts::TextPlan, char> {
+        if self.source.is_some() {
+            Ok(pdfcraft_fonts::TextPlan::default())
+        } else {
+            pdfcraft_fonts::TextPlan::for_hans_lines(self.text.trim().lines())
         }
     }
 }

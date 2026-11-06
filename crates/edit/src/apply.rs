@@ -2,10 +2,12 @@ use super::marks::{
     Background, Context, HeaderFooter, MarkKind, Watermark, add_picture_resource, bates_start, expand, matrix_number, n, picture, rgb, shrink_matrix,
 };
 use super::place::{
-    END, Isolation, add_page_resources, add_resources, begin, check, check_on_top, contents, free_font_name, isolation, page_fonts, page_list, place,
-    place_inside_wrapper, stream_tag, text_op, undrawable, wrapper_role,
+    END, Isolation, add_page_resources, add_planned_fonts, add_resources, begin, check, check_on_top, contents, free_font_name, isolation,
+    page_fonts, page_list, place, place_inside_wrapper, stream_tag, text_op, undrawable, wrapper_role,
 };
-use super::{Document, EditError, Object, added, backdrop, helvetica_width};
+use super::{Document, EditError, Object, added, backdrop, helvetica_width, literal};
+
+const WATERMARK_FONT_NAME: &str = "PCWatermark";
 
 /// Commit one complete mark operation only after every selected page succeeds. The snapshot
 /// shares original bytes, cross-references, caches and unchanged objects; only the overlay table
@@ -150,9 +152,13 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
     if text.is_empty() && wm.source.is_none() {
         return Err(EditError::Invalid("type the watermark text first".into()));
     }
-    if let Some(c) = wm.first_undrawable() {
-        return Err(undrawable(c));
-    }
+    let mut plan = wm.text_plan().map_err(|c| {
+        EditError::Invalid(format!(
+            "the PDF watermark fonts can't draw \"{}\" (U+{:04X}); choose supported text or use a watermark file",
+            c.escape_debug(),
+            u32::from(c)
+        ))
+    })?;
     if !(wm.opacity.is_finite()
         && wm.rotation.is_finite()
         && wm.font_size.is_finite()
@@ -170,7 +176,17 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
         remove_marks(doc, pages, MarkKind::Watermark)?;
     }
     let opacity = wm.opacity.clamp(0.0, 1.0);
-    let lines: Vec<&str> = text.lines().collect();
+    let lines: Vec<_> = text
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let codes = plan.encoding(i);
+            let width = if codes.is_empty() { helvetica_width(line, 1.0) } else { plan.advance_of(codes) };
+            (line, width)
+        })
+        .collect();
+    let widest = lines.iter().map(|&(_, width)| width).fold(0.0, f64::max).max(0.01);
+    let needs_helvetica = lines.iter().enumerate().any(|(i, _)| plan.encoding(i).is_empty());
     for &i in pages {
         let page = page_list(doc)[i].clone();
         let (w, h) = page.display_size(doc);
@@ -185,14 +201,17 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
             place(doc, page, MarkKind::Watermark, content.into_bytes(), wm.behind)?;
             continue;
         }
-        let widest = lines.iter().map(|l| helvetica_width(l, 1.0)).fold(0.0, f64::max).max(0.01);
+        let helvetica = free_font_name(doc, &page_fonts(doc, &page), "PCHelv", "Helvetica");
+        let faces = needs_helvetica.then(|| (helvetica.as_bytes().to_vec(), "Helvetica"));
+        add_page_resources(doc, &page, Some(opacity), faces.as_slice())?;
+        add_planned_fonts(doc, i, &mut plan, WATERMARK_FONT_NAME, WATERMARK_FONT_NAME)?;
         let size = if wm.font_size > 0.0 { wm.font_size } else { ((w * w + h * h).sqrt() * 0.5 / widest).clamp(6.0, 300.0) };
         let (s, c) = wm.rotation.to_radians().sin_cos();
         let (cx, cy) = (w / 2.0 + wm.offset[0], h / 2.0 + wm.offset[1]);
         let mut content = begin(MarkKind::Watermark, "Watermark", page.view_matrix(doc)).into_bytes();
         content.extend(
             format!(
-                "/PCGS{} gs\n{} {} {} {} {} {} cm\nBT\n/PCHelv {} Tf\n{}\n",
+                "/PCGS{} gs\n{} {} {} {} {} {} cm\nBT\n{}\n",
                 (opacity * 100.0).round() as i64,
                 n(c),
                 n(s),
@@ -200,20 +219,34 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
                 n(c),
                 n(cx),
                 n(cy),
-                n(size),
                 rgb(wm.color)
             )
             .bytes(),
         );
         let line_h = size * 1.15;
         let total = line_h * (lines.len() as f64 - 1.0);
-        for (li, line) in lines.iter().enumerate() {
-            let tw = helvetica_width(line, size);
-            content.extend(text_op(-tw / 2.0, total / 2.0 - li as f64 * line_h - size * 0.35, line));
+        for (li, &(line, width)) in lines.iter().enumerate() {
+            let x = -width * size / 2.0;
+            let y = total / 2.0 - li as f64 * line_h - size * 0.35;
+            let codes = plan.encoding(li);
+            if codes.is_empty() {
+                content.extend(format!("/{helvetica} {} Tf\n", n(size)).bytes());
+                content.extend(text_op(x, y, line));
+                continue;
+            }
+            content.extend(format!("1 0 0 1 {} {} Tm\n", n(x), n(y)).bytes());
+            for run in codes.chunk_by(|a, b| a.0 == b.0) {
+                let Some(font) = run.first().and_then(|&(font, _)| plan.fonts.get(font)) else {
+                    return Err(EditError::Invalid("a watermark font could not be registered".into()));
+                };
+                let bytes = run.iter().map(|&(_, code)| code).collect::<Vec<_>>();
+                content.extend(format!("/{} {} Tf ", font.name, n(size)).bytes());
+                content.extend(literal(&bytes));
+                content.extend_from_slice(b" Tj\n");
+            }
         }
         content.extend_from_slice(b"ET\n");
         content.extend_from_slice(END.as_bytes());
-        add_resources(doc, &page, Some(opacity), None)?;
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::Watermark, content, wm.behind)?;
     }
@@ -316,6 +349,13 @@ pub fn remove_marks(doc: &mut Document, pages: &[usize], kind: MarkKind) -> Resu
         }
         if before != kept.len() {
             doc.update_dict(page.obj, |d| d.set(b"Contents".to_vec(), Object::Array(kept)))?;
+            if kind == MarkKind::Watermark {
+                // The glyph outlines and Unicode mapping should leave the active page resources
+                // with their watermark, unless some remaining content still uses the font.
+                super::text::drop_unused_type3_fonts(doc, i, |font| {
+                    font.name(b"Subtype") == Some(b"Type3") && font.name(b"Name") == Some(WATERMARK_FONT_NAME.as_bytes())
+                });
+            }
         }
     }
     Ok(removed)

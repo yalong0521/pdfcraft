@@ -218,6 +218,8 @@ pub struct MarksDraft {
     /// The page (0-based) the preview was stepped to; `None` previews the current page. Reset
     /// each time the dialog opens.
     pub preview: Option<usize>,
+    /// Recheck glyph outlines only when the watermark text changes.
+    watermark_drawability: Option<(String, Option<char>)>,
 }
 
 impl Default for MarksDraft {
@@ -237,6 +239,7 @@ impl Default for MarksDraft {
             file_page: 1,
             backdrops: BackdropCheck::default(),
             preview: None,
+            watermark_drawability: None,
         }
     }
 }
@@ -691,12 +694,14 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
             }
             MarkKind::Watermark => {
                 let text = if wm.text.trim().is_empty() { "CONFIDENTIAL" } else { wm.text.trim() };
+                let color = rgb32(wm.color).gamma_multiply(wm.opacity as f32);
                 let size = if fit {
-                    (r.width().hypot(r.height()) * 0.5 / (text.len().max(1) as f32 * 0.55)).clamp(6.0, 80.0)
+                    let width_at_10 = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(10.0), color).size().x;
+                    (r.width().hypot(r.height()) * 5.0 / width_at_10.max(0.1)).clamp(6.0, 80.0)
                 } else {
                     (wm.font_size as f32 * s).max(5.0)
                 };
-                let galley = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(size), rgb32(wm.color).gamma_multiply(wm.opacity as f32));
+                let galley = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(size), color);
                 let angle = -(wm.rotation as f32).to_radians();
                 let half = galley.size() / 2.0;
                 let (sn, cs) = angle.sin_cos();
@@ -745,7 +750,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
             }
         });
     });
-    // Text the standard fonts can't draw is refused on apply (#125), so it's refused here, with the
+    // Text the PDF fonts can't draw is refused on apply (#125), so it's refused here, with the
     // preview (drawn in the interface font, which can draw it) no longer the only answer (#2013).
     let undrawable = undrawable(kind, d);
     if let Some(c) = undrawable {
@@ -795,12 +800,20 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
     (apply, cancel)
 }
 
-/// The first character of the dialog's text that applying would refuse (the standard fonts can't
-/// draw it), as the engine decides it. Pictures draw no text.
-fn undrawable(kind: MarkKind, d: &MarksDraft) -> Option<char> {
+/// The first character of the dialog's text that applying would refuse. Pictures draw no text.
+fn undrawable(kind: MarkKind, d: &mut MarksDraft) -> Option<char> {
     match kind {
         MarkKind::HeaderFooter => d.hf.first_undrawable(),
-        MarkKind::Watermark if !d.use_file => d.wm.first_undrawable(),
+        MarkKind::Watermark if !d.use_file => {
+            if let Some((text, missing)) = &d.watermark_drawability
+                && *text == d.wm.text
+            {
+                return *missing;
+            }
+            let missing = d.wm.first_undrawable();
+            d.watermark_drawability = Some((d.wm.text.clone(), missing));
+            missing
+        }
         MarkKind::Watermark | MarkKind::Background => None,
     }
 }
@@ -891,14 +904,14 @@ mod tests {
     fn text_applying_would_refuse_is_caught_in_the_dialog() {
         let mut d = MarksDraft::default();
         d.hf.text[5] = "Страница <<1>> из <<n>> / Page <<1>> of <<n>>".into();
-        assert_eq!(undrawable(MarkKind::HeaderFooter, &d), Some('С'), "#2013: refused before OK, not after");
+        assert_eq!(undrawable(MarkKind::HeaderFooter, &mut d), Some('С'), "#2013: refused before OK, not after");
         d.hf.text[5] = "Page <<1>> of <<n>> — café".into();
-        assert_eq!(undrawable(MarkKind::HeaderFooter, &d), None);
+        assert_eq!(undrawable(MarkKind::HeaderFooter, &mut d), None);
         d.wm.text = "ΑΠΟΡΡΗΤΟ".into();
-        assert_eq!(undrawable(MarkKind::Watermark, &d), Some('Α'));
+        assert_eq!(undrawable(MarkKind::Watermark, &mut d), Some('Α'));
         d.use_file = true;
-        assert_eq!(undrawable(MarkKind::Watermark, &d), None, "a picture watermark draws no text");
-        assert_eq!(undrawable(MarkKind::Background, &d), None);
+        assert_eq!(undrawable(MarkKind::Watermark, &mut d), None, "a picture watermark draws no text");
+        assert_eq!(undrawable(MarkKind::Background, &mut d), None);
     }
 
     #[test]

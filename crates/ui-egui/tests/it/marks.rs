@@ -124,6 +124,32 @@ fn watermark_and_background_dialogs() {
 }
 
 #[test]
+fn the_watermark_dialog_accepts_and_applies_chinese_text() {
+    if pdfcraft_fonts::ui_chinese_fonts().is_empty() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Chinese text watermarks");
+        return;
+    }
+
+    let text = "寇天笑";
+    let mut h = harness();
+    assert!(h.state_mut().execute("edit.watermark"));
+    h.run_steps(2);
+    assert!(h.query_by(|n| n.label().as_deref() == Some("OK") && n.is_disabled()).is_some());
+    h.query_by(|n| n.role() == egui::accesskit::Role::MultilineTextInput && n.placeholder() == Some("CONFIDENTIAL"))
+        .expect("watermark text field")
+        .click();
+    h.run_steps(2);
+    h.event(egui::Event::Text(text.into()));
+    h.run_steps(2);
+    assert_eq!(h.state().marks_draft.wm.text, text);
+    assert!(h.query_by(|n| n.label().as_deref() == Some("OK") && !n.is_disabled()).is_some());
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, None);
+    assert_eq!(marks(&h), [MarkKind::Watermark]);
+}
+
+#[test]
 fn backgrounds_and_watermarks_from_a_file() {
     let mut h = harness();
     h.state_mut().execute("edit.background");
